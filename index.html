@@ -233,7 +233,7 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const newId = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 
 let key = localStorage.getItem('churro_admin_key') || '';
-let data = null;           // { config, sales:[{id,ts,productId,name,price,status}] }
+let data = null;           // { config, orders:[{id,ticket,ts,items:[{productId,name,price,qty}],status}] }
 let tab = 'summary';
 let range = null;          // null=未決定, 'all' or 'YYYY-MM-DD'
 let showVoid = false;
@@ -258,8 +258,11 @@ async function fetchAll(first) {
     }
     data = {
       config: j.config,
-      sales: j.sales.map(r => ({ id: r[0], ts: r[1], productId: r[2], name: r[3], price: r[4], status: r[5] }))
-                    .sort((a, b) => a.ts - b.ts)
+      orders: j.orders.map(r => ({
+        id: r[0], ticket: r[1], ts: r[2],
+        items: JSON.parse(r[3] || '[]').map(it => ({ productId: it[0], name: it[1], price: it[2], qty: it[3] })),
+        status: r[4], doneAt: r[5]
+      })).sort((a, b) => a.ts - b.ts)
     };
     if (!dirty) draft = clone(data.config);
     connOk = true; lastOk = Date.now();
@@ -287,46 +290,53 @@ function logout(msg) {
 function showApp() { $('#loginView').hidden = true; $('#appView').hidden = false; }
 
 // ---------- 集計 ----------
-function dates() { return [...new Set(data.sales.map(s => dayKey(s.ts)))].sort(); }
+function dates() { return [...new Set(data.orders.map(o => dayKey(o.ts)))].sort(); }
 
 function compute() {
   const cfg = data.config;
   const pmap = {};
   cfg.products.forEach(p => pmap[p.id] = p);
-  const inRange = s => range === 'all' || dayKey(s.ts) === range;
-  const rows = data.sales.filter(inRange);
-  const act = rows.filter(s => s.status !== 'void');
+  const inRange = o => range === 'all' || dayKey(o.ts) === range;
+  const rows = data.orders.filter(inRange);
+  const act = rows.filter(o => o.status !== 'void');
 
   const per = {};
   const order = cfg.products.map(p => p.id);
-  act.forEach(s => {
-    if (!per[s.productId]) {
-      const p = pmap[s.productId];
-      per[s.productId] = { id: s.productId, name: p ? p.name : s.name, color: p ? p.color : '#8E8E93', unitCost: p ? p.cost : 0, qty: 0, revenue: 0 };
-      if (!order.includes(s.productId)) order.push(s.productId);
+  act.forEach(o => o.items.forEach(it => {
+    if (!per[it.productId]) {
+      const p = pmap[it.productId];
+      per[it.productId] = { id: it.productId, name: p ? p.name : it.name, color: p ? p.color : '#8E8E93',
+                            unitCost: p ? p.cost : 0, qty: 0, revenue: 0 };
+      if (!order.includes(it.productId)) order.push(it.productId);
     }
-    per[s.productId].qty++; per[s.productId].revenue += s.price;
-  });
+    per[it.productId].qty += it.qty;
+    per[it.productId].revenue += it.price * it.qty;
+  }));
   const products = order.filter(id => per[id]).map(id => {
     const x = per[id]; x.material = x.qty * x.unitCost; x.gross = x.revenue - x.material; return x;
   });
   const revenue = products.reduce((a, p) => a + p.revenue, 0);
   const material = products.reduce((a, p) => a + p.material, 0);
-  const qty = act.length;
+  const qty = products.reduce((a, p) => a + p.qty, 0);
   const fixedTotal = cfg.fixedCosts.reduce((a, f) => a + (Number(f.amount) || 0), 0);
   const fixed = range === 'all' ? fixedTotal : 0;
   const gross = revenue - material - fixed;
 
   // 時間帯
-  const hourSet = act.map(s => new Date(s.ts).getHours());
+  const hourSet = act.map(o => new Date(o.ts).getHours());
   let hMin = hourSet.length ? Math.min(...hourSet) : 10, hMax = hourSet.length ? Math.max(...hourSet) : 16;
   hMin = Math.min(hMin, 10); hMax = Math.max(hMax, 16);
   const hours = []; for (let h = hMin; h <= hMax; h++) hours.push(h);
   const matrix = {};
-  hours.forEach(h => { matrix[h] = { total: 0, revenue: 0 }; products.forEach(p => matrix[h][p.id] = 0); });
-  act.forEach(s => { const h = new Date(s.ts).getHours(); matrix[h][s.productId]++; matrix[h].total++; matrix[h].revenue += s.price; });
+  hours.forEach(h => { matrix[h] = { total: 0, revenue: 0, orders: 0 }; products.forEach(p => matrix[h][p.id] = 0); });
+  act.forEach(o => {
+    const h = new Date(o.ts).getHours();
+    matrix[h].orders++;
+    o.items.forEach(it => { matrix[h][it.productId] += it.qty; matrix[h].total += it.qty; matrix[h].revenue += it.price * it.qty; });
+  });
 
-  return { rows, act, products, revenue, material, fixed, fixedTotal, gross, qty, hours, matrix, voids: rows.length - act.length };
+  return { rows, act, products, revenue, material, fixed, fixedTotal, gross, qty,
+           orderCount: act.length, hours, matrix, voids: rows.length - act.length };
 }
 
 // ---------- 表示 ----------
@@ -411,10 +421,10 @@ function renderHourly(c) {
     <section class="group">
       <p class="group-head"><span>内訳</span><span>横にスクロール可</span></p>
       <div class="tbl-wrap"><table>
-        <thead><tr><th>時間</th>${ps.map(p => `<th>${esc(p.name)}</th>`).join('')}<th>計</th><th>売上</th></tr></thead>
+        <thead><tr><th>時間</th>${ps.map(p => `<th>${esc(p.name)}</th>`).join('')}<th>計</th><th>組数</th><th>売上</th></tr></thead>
         <tbody>${c.hours.map(h => `<tr><td>${h}:00〜</td>${ps.map(p => { const v = c.matrix[h][p.id]; return `<td class="${v ? '' : 'z'}">${v}</td>`; }).join('')}
-          <td class="${c.matrix[h].total ? '' : 'z'}">${c.matrix[h].total}</td><td class="${c.matrix[h].revenue ? '' : 'z'}">${yen(c.matrix[h].revenue)}</td></tr>`).join('')}</tbody>
-        <tfoot><tr><td>合計</td>${ps.map(p => `<td>${p.qty}</td>`).join('')}<td>${c.qty}</td><td>${yen(c.revenue)}</td></tr></tfoot>
+          <td class="${c.matrix[h].total ? '' : 'z'}">${c.matrix[h].total}</td><td class="${c.matrix[h].orders ? '' : 'z'}">${c.matrix[h].orders}</td><td class="${c.matrix[h].revenue ? '' : 'z'}">${yen(c.matrix[h].revenue)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td>合計</td>${ps.map(p => `<td>${p.qty}</td>`).join('')}<td>${c.qty}</td><td>${c.orderCount}</td><td>${yen(c.revenue)}</td></tr></tfoot>
       </table></div>
     </section>`;
   drawChart(c);
@@ -455,37 +465,41 @@ function drawChart(c) {
 
 function renderLog(c) {
   const list = (showVoid ? c.rows : c.act).slice().reverse();
-  const pmap = {}; data.config.products.forEach(p => pmap[p.id] = p);
+  const st = { waiting: 'お渡し待ち', done: 'お渡し済', void: '取消' };
   $('#main').innerHTML = `
     <section class="group">
       <div class="list">
-        <div class="row"><span class="row-label">取消分も表示<div class="row-sub">取消 ${c.voids}件</div></span>
+        <div class="row"><span class="row-label">取消分も表示<div class="row-sub">取消 ${c.voids}組</div></span>
           <label class="sw"><input type="checkbox" id="voidSw" ${showVoid ? 'checked' : ''}><span class="sw-track"></span></label></div>
       </div>
     </section>
     <section class="group">
-      <p class="group-head"><span>${list.length}件（新しい順）</span><button class="btn btn-plain" id="csvBtn" style="min-height:32px;font-size:13px">CSV書き出し</button></p>
+      <p class="group-head"><span>${list.length}組（新しい順）</span><button class="btn btn-plain" id="csvBtn" style="min-height:32px;font-size:13px">CSV書き出し</button></p>
       <div class="list">
-        ${list.length ? list.slice(0, 500).map(s => `
-          <div class="row log ${s.status === 'void' ? 'void' : ''}">
-            <span class="dot" style="background:${esc((pmap[s.productId] || {}).color || '#8E8E93')}"></span>
-            <span class="t">${range === 'all' ? dayLabel(dayKey(s.ts)).replace(/（.）/, '') + ' ' : ''}${hms(s.ts)}</span>
-            <span class="row-label">${esc(s.name)}</span>
-            <span class="row-value">${yen(s.price)}</span>
+        ${list.length ? list.slice(0, 300).map(o => `
+          <div class="row log ${o.status === 'void' ? 'void' : ''}">
+            <span class="t">${range === 'all' ? dayLabel(dayKey(o.ts)).replace(/（.）/, '') + ' ' : ''}${hms(o.ts)}</span>
+            <span class="row-label"><b>No.${o.ticket}</b> ${esc(o.items.map(i => i.name + '×' + i.qty).join(' / '))}
+              <div class="row-sub">${st[o.status] || o.status}</div></span>
+            <span class="row-value">${yen(o.items.reduce((a, i) => a + i.price * i.qty, 0))}</span>
           </div>`).join('') : '<div class="row"><span class="row-label row-sub">データがありません</span></div>'}
       </div>
-      ${list.length > 500 ? '<p class="cap">最新500件を表示中。全件はCSVかスプレッドシートで確認できます。</p>' : ''}
+      ${list.length > 300 ? '<p class="cap">最新300組を表示中。全件はCSVかスプレッドシートで確認できます。</p>' : ''}
     </section>`;
 }
 
 function exportCsv() {
   const pmap = {}; data.config.products.forEach(p => pmap[p.id] = p);
-  const rows = [['日付', '時刻', '商品', '単価', '原価', '状態']];
-  data.sales.forEach(s => rows.push([dayKey(s.ts), hms(s.ts), s.name, s.price, (pmap[s.productId] || {}).cost || 0, s.status === 'void' ? '取消' : '有効']));
+  const rows = [['日付', '時刻', '整理券', '商品', '個数', '単価', '原価', '金額', '状態']];
+  data.orders.forEach(o => o.items.forEach(i => rows.push([
+    dayKey(o.ts), hms(o.ts), o.ticket, i.name, i.qty, i.price,
+    (pmap[i.productId] || {}).cost || 0, i.price * i.qty,
+    o.status === 'void' ? '取消' : o.status === 'done' ? 'お渡し済' : 'お渡し待ち'
+  ])));
   const csv = '\uFEFF' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = 'churros_sales_' + dayKey(Date.now()) + '.csv';
+  a.download = 'churros_orders_' + dayKey(Date.now()) + '.csv';
   document.body.appendChild(a); a.click(); a.remove();
 }
 
