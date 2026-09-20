@@ -526,10 +526,7 @@ function renderStock(c) {
   const st = data.stock || { totalPieces: 0, usedPieces: 0, leftPieces: 0, warnAt: 0, warn: false, pcsPerBag: 0 };
   const pur = (cfg.purchases || []).slice().reverse();
   const bags = st.pcsPerBag ? (st.leftPieces / st.pcsPerBag) : 0;
-  const surplusPcs = Object.keys(data.surplus || {}).reduce((a, pid) => {
-    const p = cfg.products.find(x => x.id === pid);
-    return a + (data.surplus[pid] || 0) * (p ? Number(p.pcs) || 0 : 0);
-  }, 0);
+  const surplusPcs = Object.keys(data.surplus || {}).reduce((a, f) => a + (Number(data.surplus[f]) || 0), 0);
   const unit = unitPieceCost();
 
   $('#main').innerHTML = `
@@ -592,10 +589,11 @@ function renderSettings() {
   const fixedTotal = draft.fixedCosts.reduce((a, f) => a + (Number(f.amount) || 0), 0);
   $('#main').innerHTML = `
     <section class="group">
-      <p class="group-head"><span>商品</span><span>原価は仕入れから自動計算</span></p>
+      <p class="group-head"><span>商品</span><span>同じ味は余剰在庫を共有</span></p>
       ${draft.products.map((p, i) => `
         <div class="list pcard" data-pi="${i}">
-          <div class="frow"><label>商品名</label><input class="field" data-f="name" value="${esc(p.name)}" placeholder="例：シナモン"></div>
+          <div class="frow"><label>商品名</label><input class="field" data-f="name" value="${esc(p.name)}" placeholder="例：シナモン 3本"></div>
+          <div class="frow"><label>味</label><input class="field" data-f="flavor" value="${esc(p.flavor || '')}" placeholder="${esc(p.name || '商品名と同じ')}"></div>
           <div class="frow"><label>価格</label><input class="field r" data-f="price" type="number" inputmode="numeric" min="0" value="${p.price}"><span class="unit">円</span></div>
           <div class="frow"><label>封入本数</label><input class="field r" data-f="pcs" type="number" inputmode="numeric" min="0" value="${p.pcs == null ? 1 : p.pcs}"><span class="unit">本</span></div>
           <div class="frow"><label>原価</label><span style="flex:1;text-align:right;color:var(--label-2);font-variant-numeric:tabular-nums">${yen(productCost(p))}</span><span class="unit">/個</span></div>
@@ -681,7 +679,8 @@ $('#main').addEventListener('input', e => {
   const pc = t.closest('[data-pi]'), fc = t.closest('[data-fi]');
   if (pc && t.dataset.f && t.dataset.f !== 'active') {
     const p = draft.products[+pc.dataset.pi];
-    p[t.dataset.f] = t.dataset.f === 'name' ? t.value : Math.max(0, Math.round(Number(t.value) || 0));
+    p[t.dataset.f] = (t.dataset.f === 'name' || t.dataset.f === 'flavor')
+      ? t.value : Math.max(0, Math.round(Number(t.value) || 0));
     markDirty();
   } else if (fc && t.dataset.g) {
     const f = draft.fixedCosts[+fc.dataset.fi];
@@ -699,7 +698,7 @@ $('#main').addEventListener('click', e => {
   }
   if (t.closest('#csvBtn')) { exportCsv(); return; }
   if (t.closest('#addP')) {
-    draft.products.push({ id: newId('p_'), name: '', price: 0, pcs: 1, color: PALETTE[draft.products.length % PALETTE.length], active: true });
+    draft.products.push({ id: newId('p_'), name: '', flavor: '', price: 0, pcs: 1, color: PALETTE[draft.products.length % PALETTE.length], active: true });
     markDirty(); renderSettings(); return;
   }
   if (t.closest('#addF')) { draft.fixedCosts.push({ id: newId('f_'), name: '', amount: 0 }); markDirty(); renderSettings(); return; }
